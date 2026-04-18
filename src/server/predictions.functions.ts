@@ -12,12 +12,112 @@ export type Prediction = {
   reasoning: string;
 };
 
+type Fixture = {
+  match: string;
+  competition: string;
+  date: string; // ISO YYYY-MM-DD
+  extra?: string; // e.g. surface for tennis, venue
+};
+
+const HOSTS: Record<Sport, string> = {
+  football: "v3.football.api-sports.io",
+  basketball: "v1.basketball.api-sports.io",
+  ice_hockey: "v1.hockey.api-sports.io",
+  tennis: "v1.tennis.api-sports.io",
+};
+
 const SPORT_LABEL: Record<Sport, string> = {
   football: "association football (soccer)",
-  basketball: "basketball (NBA / EuroLeague)",
-  ice_hockey: "ice hockey (NHL)",
-  tennis: "tennis (ATP / WTA)",
+  basketball: "basketball",
+  ice_hockey: "ice hockey",
+  tennis: "tennis",
 };
+
+function nextNDates(n: number): string[] {
+  const out: string[] = [];
+  const d = new Date();
+  for (let i = 0; i < n; i++) {
+    const x = new Date(d);
+    x.setUTCDate(d.getUTCDate() + i);
+    out.push(x.toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+async function apiSportsGet(host: string, path: string, apiKey: string) {
+  const res = await fetch(`https://${host}${path}`, {
+    headers: {
+      "x-rapidapi-key": apiKey,
+      "x-rapidapi-host": host,
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`API-Sports ${host}${path} → ${res.status}`);
+  }
+  return res.json();
+}
+
+async function fetchFixtures(sport: Sport, apiKey: string): Promise<Fixture[]> {
+  const host = HOSTS[sport];
+  const dates = nextNDates(7);
+  const fixtures: Fixture[] = [];
+
+  if (sport === "football") {
+    // /fixtures?date=YYYY-MM-DD
+    for (const date of dates) {
+      try {
+        const json = await apiSportsGet(host, `/fixtures?date=${date}`, apiKey);
+        for (const f of json.response ?? []) {
+          fixtures.push({
+            match: `${f.teams?.home?.name} vs ${f.teams?.away?.name}`,
+            competition: `${f.league?.name}${f.league?.country ? ` (${f.league.country})` : ""}`,
+            date,
+          });
+        }
+      } catch (e) {
+        console.error("football fetch failed", date, e);
+      }
+    }
+  } else if (sport === "basketball" || sport === "ice_hockey") {
+    // /games?date=YYYY-MM-DD
+    for (const date of dates) {
+      try {
+        const json = await apiSportsGet(host, `/games?date=${date}`, apiKey);
+        for (const g of json.response ?? []) {
+          fixtures.push({
+            match: `${g.teams?.home?.name} vs ${g.teams?.away?.name}`,
+            competition: `${g.league?.name}${g.country?.name ? ` (${g.country.name})` : ""}`,
+            date,
+          });
+        }
+      } catch (e) {
+        console.error(`${sport} fetch failed`, date, e);
+      }
+    }
+  } else if (sport === "tennis") {
+    // /games?date=YYYY-MM-DD
+    for (const date of dates) {
+      try {
+        const json = await apiSportsGet(host, `/games?date=${date}`, apiKey);
+        for (const g of json.response ?? []) {
+          const home = g.teams?.home?.name ?? g.players?.home?.name;
+          const away = g.teams?.away?.name ?? g.players?.away?.name;
+          if (!home || !away) continue;
+          fixtures.push({
+            match: `${home} vs ${away}`,
+            competition: `${g.league?.name ?? "ATP/WTA"}${g.league?.type ? ` · ${g.league.type}` : ""}`,
+            date,
+          });
+        }
+      } catch (e) {
+        console.error("tennis fetch failed", date, e);
+      }
+    }
+  }
+
+  // Cap to keep prompt small
+  return fixtures.slice(0, 60);
+}
 
 export const analyzeMatches = createServerFn({ method: "POST" })
   .inputValidator((input: { sport: Sport }) => {
@@ -26,39 +126,65 @@ export const analyzeMatches = createServerFn({ method: "POST" })
     return input;
   })
   .handler(async ({ data }) => {
-    const apiKey = process.env.LOVABLE_API_KEY;
-    if (!apiKey) {
+    const aiKey = process.env.LOVABLE_API_KEY;
+    const sportsKey = process.env.API_SPORTS_KEY;
+
+    if (!aiKey) {
+      return { ok: false as const, error: "AI gateway is not configured.", predictions: [] };
+    }
+    if (!sportsKey) {
+      return { ok: false as const, error: "Sports data API key is not configured.", predictions: [] };
+    }
+
+    // 1. Fetch real fixtures
+    let fixtures: Fixture[] = [];
+    try {
+      fixtures = await fetchFixtures(data.sport, sportsKey);
+    } catch (e) {
+      console.error("fetchFixtures failed", e);
       return {
         ok: false as const,
-        error: "AI gateway is not configured. Please contact the developer.",
+        error: "Could not load live fixtures from sports data API.",
         predictions: [],
       };
     }
 
+    if (fixtures.length === 0) {
+      return {
+        ok: false as const,
+        error: `No ${SPORT_LABEL[data.sport]} fixtures found for the next 7 days.`,
+        predictions: [],
+      };
+    }
+
+    // 2. Send fixtures to AI for analysis
     const today = new Date().toISOString().slice(0, 10);
     const sportLabel = SPORT_LABEL[data.sport];
 
-    const systemPrompt = `You are a professional sports analyst that produces probability-rated betting selections.
-You reason from general knowledge of teams, players, recent form, head-to-head trends, and typical scheduling.
-You DO NOT have live internet access — be transparent about this in your reasoning when relevant.
-You return ONLY structured data via the provided tool.
+    const fixturesText = fixtures
+      .map((f, i) => `${i + 1}. [${f.date}] ${f.match} — ${f.competition}`)
+      .join("\n");
+
+    const systemPrompt = `You are a professional ${sportLabel} analyst producing probability-rated betting selections.
+You will be given a LIST OF REAL UPCOMING MATCHES scheduled in the next 7 days starting ${today}.
+For each match you analyze, you MUST use the exact team/player names and date as provided.
+Reason from your knowledge of recent form, injuries, head-to-head, home advantage, surface (tennis), and rest days.
+You DO NOT have live news access — be honest in reasoning if recent context is uncertain.
 
 Rules:
-- Cover the upcoming week (next 7 days) starting from ${today}.
-- Provide between 5 and 12 of the most notable upcoming matches you are aware of for the sport.
-- For each, give exactly ONE betting pick on a common market (Match Winner, Over/Under, Handicap, Both Teams To Score, Set Winner for tennis, Money Line for hockey/basketball, etc.).
-- Probability is YOUR honest model-estimated probability that the pick wins, expressed 0-100.
-- Be calibrated — most edges are 50-70%. Reserve 80%+ for genuinely lopsided matchups.
-- Reasoning: 1-2 sentences citing the specific factors (form, injuries, H2H, home advantage).
-- If you are not confident any matches are happening this week, return an empty array.`;
+- Pick the 8-15 most interesting matches from the list (skip unknown lower-tier matches).
+- For each, give exactly ONE bet on a common market (Match Winner, Money Line, Over/Under, Handicap, BTTS, Set Winner).
+- Probability is YOUR honest model-estimated probability the pick wins (0-100). Be calibrated — most edges are 50-70%; reserve 80%+ for genuinely lopsided matchups.
+- Reasoning: 1-2 sentences citing specific factors.
+- Return ONLY structured data via the provided tool.`;
 
-    const userPrompt = `Analyze the most likely upcoming ${sportLabel} matches for the week starting ${today} and return your top picks.`;
+    const userPrompt = `Real upcoming ${sportLabel} fixtures:\n\n${fixturesText}\n\nAnalyze the most notable ones and return your picks.`;
 
     try {
       const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${aiKey}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -81,16 +207,13 @@ Rules:
                       items: {
                         type: "object",
                         properties: {
-                          match: { type: "string", description: "Team A vs Team B (or Player A vs Player B)" },
-                          competition: { type: "string", description: "League / tournament name" },
-                          date: { type: "string", description: "Approximate match date, ISO YYYY-MM-DD" },
-                          market: { type: "string", description: "Betting market e.g. Match Winner, Over 2.5, Money Line" },
-                          pick: { type: "string", description: "The selection itself e.g. 'Manchester City', 'Over 2.5', 'Djokovic -1.5 sets'" },
-                          probability: {
-                            type: "number",
-                            description: "Estimated probability the pick wins, 0-100",
-                          },
-                          reasoning: { type: "string", description: "1-2 sentence justification" },
+                          match: { type: "string", description: "Exact match name from the input list" },
+                          competition: { type: "string" },
+                          date: { type: "string", description: "ISO YYYY-MM-DD from the input list" },
+                          market: { type: "string" },
+                          pick: { type: "string" },
+                          probability: { type: "number", description: "0-100" },
+                          reasoning: { type: "string" },
                         },
                         required: ["match", "competition", "date", "market", "pick", "probability", "reasoning"],
                         additionalProperties: false,
@@ -108,10 +231,10 @@ Rules:
       });
 
       if (response.status === 429) {
-        return { ok: false as const, error: "Rate limit reached. Please wait a moment and try again.", predictions: [] };
+        return { ok: false as const, error: "Rate limit reached. Please wait and try again.", predictions: [] };
       }
       if (response.status === 402) {
-        return { ok: false as const, error: "AI usage credits exhausted. Add credits in Settings → Workspace → Usage.", predictions: [] };
+        return { ok: false as const, error: "AI usage credits exhausted.", predictions: [] };
       }
       if (!response.ok) {
         const text = await response.text();
