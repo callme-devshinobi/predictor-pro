@@ -15,39 +15,8 @@ export type Prediction = {
 type Fixture = {
   match: string;
   competition: string;
-  date: string; // ISO YYYY-MM-DD
-  extra?: string; // e.g. surface for tennis, venue
+  date: string;
 };
-
-const HOSTS: Record<Sport, string> = {
-  football: "v3.football.api-sports.io",
-  basketball: "v1.basketball.api-sports.io",
-  ice_hockey: "v1.hockey.api-sports.io",
-  tennis: "v1.tennis.api-sports.io",
-};
-
-// Top football leagues we care about (api-sports league IDs)
-const FOOTBALL_LEAGUE_IDS = [
-  39,  // Premier League (England)
-  140, // La Liga (Spain)
-  135, // Serie A (Italy)
-  78,  // Bundesliga (Germany)
-  61,  // Ligue 1 (France)
-  2,   // UEFA Champions League
-  3,   // UEFA Europa League
-  848, // UEFA Conference League
-  45,  // FA Cup
-  143, // Copa del Rey
-  137, // Coppa Italia
-  81,  // DFB Pokal
-  88,  // Eredivisie
-  94,  // Primeira Liga
-  203, // Süper Lig
-];
-
-// Major basketball leagues — NBA + EuroLeague
-const BASKETBALL_LEAGUE_IDS = [12, 120]; // 12 = NBA, 120 = EuroLeague
-const HOCKEY_LEAGUE_IDS = [57]; // 57 = NHL
 
 const SPORT_LABEL: Record<Sport, string> = {
   football: "association football (soccer)",
@@ -55,6 +24,32 @@ const SPORT_LABEL: Record<Sport, string> = {
   ice_hockey: "ice hockey",
   tennis: "tennis",
 };
+
+// TheSportsDB league IDs we want to cover
+const LEAGUE_IDS: Record<Sport, number[]> = {
+  football: [
+    4328, // English Premier League
+    4335, // Spanish La Liga
+    4332, // Italian Serie A
+    4331, // German Bundesliga
+    4334, // French Ligue 1
+    4480, // UEFA Champions League
+    4481, // UEFA Europa League
+    5071, // UEFA Conference League
+    4337, // Dutch Eredivisie
+    4344, // Portuguese Primeira Liga
+    4339, // Turkish Super Lig
+    4346, // Major League Soccer
+    4329, // English Championship
+  ],
+  basketball: [4387], // NBA
+  ice_hockey: [4380], // NHL
+  tennis: [], // tennis is per-tournament; handled separately
+};
+
+// TheSportsDB free public key — confirmed in their docs
+const TSDB_KEY = "123";
+const TSDB_BASE = `https://www.thesportsdb.com/api/v1/json/${TSDB_KEY}`;
 
 function nextNDates(n: number): string[] {
   const out: string[] = [];
@@ -67,103 +62,70 @@ function nextNDates(n: number): string[] {
   return out;
 }
 
-async function apiSportsGet(host: string, path: string, apiKey: string) {
-  const res = await fetch(`https://${host}${path}`, {
-    headers: {
-      "x-rapidapi-key": apiKey,
-      "x-rapidapi-host": host,
-    },
-  });
-  if (!res.ok) {
-    throw new Error(`API-Sports ${host}${path} → ${res.status}`);
-  }
+async function tsdbGet(path: string): Promise<any> {
+  const res = await fetch(`${TSDB_BASE}${path}`);
+  if (!res.ok) throw new Error(`TheSportsDB ${path} → ${res.status}`);
   return res.json();
 }
 
-async function fetchFixtures(sport: Sport, apiKey: string): Promise<Fixture[]> {
-  const host = HOSTS[sport];
-  const dates = nextNDates(7);
-  const fixtures: Fixture[] = [];
+async function fetchLeagueNextEvents(leagueId: number): Promise<Fixture[]> {
+  try {
+    const json = await tsdbGet(`/eventsnextleague.php?id=${leagueId}`);
+    const events: any[] = json?.events ?? [];
+    return events
+      .filter((e) => e.dateEvent && e.strHomeTeam && e.strAwayTeam)
+      .map((e) => ({
+        match: `${e.strHomeTeam} vs ${e.strAwayTeam}`,
+        competition: e.strLeague ?? "",
+        date: e.dateEvent,
+      }));
+  } catch (e) {
+    console.error("league fetch failed", leagueId, e);
+    return [];
+  }
+}
 
-  if (sport === "football") {
-    const tasks: Promise<void>[] = [];
-    for (const date of dates) {
-      for (const leagueId of FOOTBALL_LEAGUE_IDS) {
-        tasks.push(
-          (async () => {
-            try {
-              const season = new Date().getUTCFullYear();
-              const json = await apiSportsGet(
-                host,
-                `/fixtures?date=${date}&league=${leagueId}&season=${season}`,
-                apiKey,
-              );
-              for (const f of json.response ?? []) {
-                fixtures.push({
-                  match: `${f.teams?.home?.name} vs ${f.teams?.away?.name}`,
-                  competition: `${f.league?.name}${f.league?.country ? ` (${f.league.country})` : ""}`,
-                  date,
-                });
-              }
-            } catch (e) {
-              console.error("football fetch failed", date, leagueId, e);
-            }
-          })(),
-        );
-      }
+async function fetchTennisFixtures(dates: string[]): Promise<Fixture[]> {
+  // Tennis: query by day across the Tennis sport
+  const tasks = dates.map(async (date) => {
+    try {
+      const json = await tsdbGet(`/eventsday.php?d=${date}&s=Tennis`);
+      const events: any[] = json?.events ?? [];
+      return events
+        .filter((e) => e.strHomeTeam && e.strAwayTeam)
+        .map((e) => ({
+          match: `${e.strHomeTeam} vs ${e.strAwayTeam}`,
+          competition: e.strLeague ?? "Tennis",
+          date,
+        }));
+    } catch (e) {
+      console.error("tennis fetch failed", date, e);
+      return [];
     }
-    await Promise.all(tasks);
-  } else if (sport === "basketball" || sport === "ice_hockey") {
-    const leagueIds = sport === "basketball" ? BASKETBALL_LEAGUE_IDS : HOCKEY_LEAGUE_IDS;
-    const tasks: Promise<void>[] = [];
-    for (const date of dates) {
-      for (const leagueId of leagueIds) {
-        tasks.push(
-          (async () => {
-            try {
-              const y = new Date().getUTCFullYear();
-              const season = `${y - 1}-${y}`;
-              const json = await apiSportsGet(
-                host,
-                `/games?date=${date}&league=${leagueId}&season=${season}`,
-                apiKey,
-              );
-              for (const g of json.response ?? []) {
-                fixtures.push({
-                  match: `${g.teams?.home?.name} vs ${g.teams?.away?.name}`,
-                  competition: `${g.league?.name}${g.country?.name ? ` (${g.country.name})` : ""}`,
-                  date,
-                });
-              }
-            } catch (e) {
-              console.error(`${sport} fetch failed`, date, leagueId, e);
-            }
-          })(),
-        );
-      }
-    }
-    await Promise.all(tasks);
-  } else if (sport === "tennis") {
-    for (const date of dates) {
-      try {
-        const json = await apiSportsGet(host, `/games?date=${date}`, apiKey);
-        for (const g of json.response ?? []) {
-          const home = g.teams?.home?.name ?? g.players?.home?.name;
-          const away = g.teams?.away?.name ?? g.players?.away?.name;
-          if (!home || !away) continue;
-          fixtures.push({
-            match: `${home} vs ${away}`,
-            competition: `${g.league?.name ?? "ATP/WTA"}${g.league?.type ? ` · ${g.league.type}` : ""}`,
-            date,
-          });
-        }
-      } catch (e) {
-        console.error("tennis fetch failed", date, e);
+  });
+  const results = await Promise.all(tasks);
+  return results.flat();
+}
+
+async function fetchFixtures(sport: Sport): Promise<Fixture[]> {
+  const fixtures: Fixture[] = [];
+  const horizon = nextNDates(7); // today + next 6 days
+  const horizonSet = new Set(horizon);
+
+  if (sport === "tennis") {
+    const tennisFx = await fetchTennisFixtures(horizon);
+    fixtures.push(...tennisFx);
+  } else {
+    const leagueIds = LEAGUE_IDS[sport];
+    const results = await Promise.all(leagueIds.map((id) => fetchLeagueNextEvents(id)));
+    for (const arr of results) {
+      for (const f of arr) {
+        if (horizonSet.has(f.date)) fixtures.push(f);
       }
     }
   }
 
-  // Dedupe by match+date
+  // Dedupe by date+match
   const seen = new Set<string>();
   const unique = fixtures.filter((f) => {
     const k = `${f.date}|${f.match}`;
@@ -171,6 +133,9 @@ async function fetchFixtures(sport: Sport, apiKey: string): Promise<Fixture[]> {
     seen.add(k);
     return true;
   });
+
+  // Sort by date ascending
+  unique.sort((a, b) => a.date.localeCompare(b.date));
 
   return unique.slice(0, 120);
 }
@@ -183,19 +148,14 @@ export const analyzeMatches = createServerFn({ method: "POST" })
   })
   .handler(async ({ data }) => {
     const aiKey = process.env.LOVABLE_API_KEY;
-    const sportsKey = process.env.API_SPORTS_KEY;
-
     if (!aiKey) {
       return { ok: false as const, error: "AI gateway is not configured.", predictions: [] };
     }
-    if (!sportsKey) {
-      return { ok: false as const, error: "Sports data API key is not configured.", predictions: [] };
-    }
 
-    // 1. Fetch real fixtures
+    // 1. Fetch real fixtures from TheSportsDB
     let fixtures: Fixture[] = [];
     try {
-      fixtures = await fetchFixtures(data.sport, sportsKey);
+      fixtures = await fetchFixtures(data.sport);
     } catch (e) {
       console.error("fetchFixtures failed", e);
       return {
