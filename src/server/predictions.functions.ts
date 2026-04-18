@@ -26,6 +26,29 @@ const HOSTS: Record<Sport, string> = {
   tennis: "v1.tennis.api-sports.io",
 };
 
+// Top football leagues we care about (api-sports league IDs)
+const FOOTBALL_LEAGUE_IDS = [
+  39,  // Premier League (England)
+  140, // La Liga (Spain)
+  135, // Serie A (Italy)
+  78,  // Bundesliga (Germany)
+  61,  // Ligue 1 (France)
+  2,   // UEFA Champions League
+  3,   // UEFA Europa League
+  848, // UEFA Conference League
+  45,  // FA Cup
+  143, // Copa del Rey
+  137, // Coppa Italia
+  81,  // DFB Pokal
+  88,  // Eredivisie
+  94,  // Primeira Liga
+  203, // Süper Lig
+];
+
+// Major basketball leagues — NBA + EuroLeague
+const BASKETBALL_LEAGUE_IDS = [12, 120]; // 12 = NBA, 120 = EuroLeague
+const HOCKEY_LEAGUE_IDS = [57]; // 57 = NHL
+
 const SPORT_LABEL: Record<Sport, string> = {
   football: "association football (soccer)",
   basketball: "basketball",
