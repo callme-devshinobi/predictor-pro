@@ -228,7 +228,8 @@ Reason from your knowledge of recent form, injuries, head-to-head, home advantag
 You DO NOT have live news access — be honest in reasoning if recent context is uncertain.
 
 Rules:
-- Pick the 8-15 most interesting matches from the list (skip unknown lower-tier matches).
+- Analyze EVERY match in the list — do not skip any. If the list has 40 matches, return 40 predictions.
+- Only skip a match if you genuinely have zero knowledge of either team/player.
 - For each, give exactly ONE bet on a common market (Match Winner, Money Line, Over/Under, Handicap, BTTS, Set Winner).
 - Probability is YOUR honest model-estimated probability the pick wins (0-100). Be calibrated — most edges are 50-70%; reserve 80%+ for genuinely lopsided matchups.
 - Reasoning: 1-2 sentences citing specific factors.
