@@ -86,39 +86,64 @@ async function fetchFixtures(sport: Sport, apiKey: string): Promise<Fixture[]> {
   const fixtures: Fixture[] = [];
 
   if (sport === "football") {
-    // /fixtures?date=YYYY-MM-DD
+    const tasks: Promise<void>[] = [];
     for (const date of dates) {
-      try {
-        const json = await apiSportsGet(host, `/fixtures?date=${date}`, apiKey);
-        for (const f of json.response ?? []) {
-          fixtures.push({
-            match: `${f.teams?.home?.name} vs ${f.teams?.away?.name}`,
-            competition: `${f.league?.name}${f.league?.country ? ` (${f.league.country})` : ""}`,
-            date,
-          });
-        }
-      } catch (e) {
-        console.error("football fetch failed", date, e);
+      for (const leagueId of FOOTBALL_LEAGUE_IDS) {
+        tasks.push(
+          (async () => {
+            try {
+              const season = new Date().getUTCFullYear();
+              const json = await apiSportsGet(
+                host,
+                `/fixtures?date=${date}&league=${leagueId}&season=${season}`,
+                apiKey,
+              );
+              for (const f of json.response ?? []) {
+                fixtures.push({
+                  match: `${f.teams?.home?.name} vs ${f.teams?.away?.name}`,
+                  competition: `${f.league?.name}${f.league?.country ? ` (${f.league.country})` : ""}`,
+                  date,
+                });
+              }
+            } catch (e) {
+              console.error("football fetch failed", date, leagueId, e);
+            }
+          })(),
+        );
       }
     }
+    await Promise.all(tasks);
   } else if (sport === "basketball" || sport === "ice_hockey") {
-    // /games?date=YYYY-MM-DD
+    const leagueIds = sport === "basketball" ? BASKETBALL_LEAGUE_IDS : HOCKEY_LEAGUE_IDS;
+    const tasks: Promise<void>[] = [];
     for (const date of dates) {
-      try {
-        const json = await apiSportsGet(host, `/games?date=${date}`, apiKey);
-        for (const g of json.response ?? []) {
-          fixtures.push({
-            match: `${g.teams?.home?.name} vs ${g.teams?.away?.name}`,
-            competition: `${g.league?.name}${g.country?.name ? ` (${g.country.name})` : ""}`,
-            date,
-          });
-        }
-      } catch (e) {
-        console.error(`${sport} fetch failed`, date, e);
+      for (const leagueId of leagueIds) {
+        tasks.push(
+          (async () => {
+            try {
+              const y = new Date().getUTCFullYear();
+              const season = `${y - 1}-${y}`;
+              const json = await apiSportsGet(
+                host,
+                `/games?date=${date}&league=${leagueId}&season=${season}`,
+                apiKey,
+              );
+              for (const g of json.response ?? []) {
+                fixtures.push({
+                  match: `${g.teams?.home?.name} vs ${g.teams?.away?.name}`,
+                  competition: `${g.league?.name}${g.country?.name ? ` (${g.country.name})` : ""}`,
+                  date,
+                });
+              }
+            } catch (e) {
+              console.error(`${sport} fetch failed`, date, leagueId, e);
+            }
+          })(),
+        );
       }
     }
+    await Promise.all(tasks);
   } else if (sport === "tennis") {
-    // /games?date=YYYY-MM-DD
     for (const date of dates) {
       try {
         const json = await apiSportsGet(host, `/games?date=${date}`, apiKey);
@@ -138,8 +163,16 @@ async function fetchFixtures(sport: Sport, apiKey: string): Promise<Fixture[]> {
     }
   }
 
-  // Cap to keep prompt small
-  return fixtures.slice(0, 60);
+  // Dedupe by match+date
+  const seen = new Set<string>();
+  const unique = fixtures.filter((f) => {
+    const k = `${f.date}|${f.match}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  return unique.slice(0, 120);
 }
 
 export const analyzeMatches = createServerFn({ method: "POST" })
