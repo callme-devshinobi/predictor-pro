@@ -26,6 +26,29 @@ const HOSTS: Record<Sport, string> = {
   tennis: "v1.tennis.api-sports.io",
 };
 
+// Top football leagues we care about (api-sports league IDs)
+const FOOTBALL_LEAGUE_IDS = [
+  39,  // Premier League (England)
+  140, // La Liga (Spain)
+  135, // Serie A (Italy)
+  78,  // Bundesliga (Germany)
+  61,  // Ligue 1 (France)
+  2,   // UEFA Champions League
+  3,   // UEFA Europa League
+  848, // UEFA Conference League
+  45,  // FA Cup
+  143, // Copa del Rey
+  137, // Coppa Italia
+  81,  // DFB Pokal
+  88,  // Eredivisie
+  94,  // Primeira Liga
+  203, // Süper Lig
+];
+
+// Major basketball leagues — NBA + EuroLeague
+const BASKETBALL_LEAGUE_IDS = [12, 120]; // 12 = NBA, 120 = EuroLeague
+const HOCKEY_LEAGUE_IDS = [57]; // 57 = NHL
+
 const SPORT_LABEL: Record<Sport, string> = {
   football: "association football (soccer)",
   basketball: "basketball",
@@ -63,39 +86,64 @@ async function fetchFixtures(sport: Sport, apiKey: string): Promise<Fixture[]> {
   const fixtures: Fixture[] = [];
 
   if (sport === "football") {
-    // /fixtures?date=YYYY-MM-DD
+    const tasks: Promise<void>[] = [];
     for (const date of dates) {
-      try {
-        const json = await apiSportsGet(host, `/fixtures?date=${date}`, apiKey);
-        for (const f of json.response ?? []) {
-          fixtures.push({
-            match: `${f.teams?.home?.name} vs ${f.teams?.away?.name}`,
-            competition: `${f.league?.name}${f.league?.country ? ` (${f.league.country})` : ""}`,
-            date,
-          });
-        }
-      } catch (e) {
-        console.error("football fetch failed", date, e);
+      for (const leagueId of FOOTBALL_LEAGUE_IDS) {
+        tasks.push(
+          (async () => {
+            try {
+              const season = new Date().getUTCFullYear();
+              const json = await apiSportsGet(
+                host,
+                `/fixtures?date=${date}&league=${leagueId}&season=${season}`,
+                apiKey,
+              );
+              for (const f of json.response ?? []) {
+                fixtures.push({
+                  match: `${f.teams?.home?.name} vs ${f.teams?.away?.name}`,
+                  competition: `${f.league?.name}${f.league?.country ? ` (${f.league.country})` : ""}`,
+                  date,
+                });
+              }
+            } catch (e) {
+              console.error("football fetch failed", date, leagueId, e);
+            }
+          })(),
+        );
       }
     }
+    await Promise.all(tasks);
   } else if (sport === "basketball" || sport === "ice_hockey") {
-    // /games?date=YYYY-MM-DD
+    const leagueIds = sport === "basketball" ? BASKETBALL_LEAGUE_IDS : HOCKEY_LEAGUE_IDS;
+    const tasks: Promise<void>[] = [];
     for (const date of dates) {
-      try {
-        const json = await apiSportsGet(host, `/games?date=${date}`, apiKey);
-        for (const g of json.response ?? []) {
-          fixtures.push({
-            match: `${g.teams?.home?.name} vs ${g.teams?.away?.name}`,
-            competition: `${g.league?.name}${g.country?.name ? ` (${g.country.name})` : ""}`,
-            date,
-          });
-        }
-      } catch (e) {
-        console.error(`${sport} fetch failed`, date, e);
+      for (const leagueId of leagueIds) {
+        tasks.push(
+          (async () => {
+            try {
+              const y = new Date().getUTCFullYear();
+              const season = `${y - 1}-${y}`;
+              const json = await apiSportsGet(
+                host,
+                `/games?date=${date}&league=${leagueId}&season=${season}`,
+                apiKey,
+              );
+              for (const g of json.response ?? []) {
+                fixtures.push({
+                  match: `${g.teams?.home?.name} vs ${g.teams?.away?.name}`,
+                  competition: `${g.league?.name}${g.country?.name ? ` (${g.country.name})` : ""}`,
+                  date,
+                });
+              }
+            } catch (e) {
+              console.error(`${sport} fetch failed`, date, leagueId, e);
+            }
+          })(),
+        );
       }
     }
+    await Promise.all(tasks);
   } else if (sport === "tennis") {
-    // /games?date=YYYY-MM-DD
     for (const date of dates) {
       try {
         const json = await apiSportsGet(host, `/games?date=${date}`, apiKey);
@@ -115,8 +163,16 @@ async function fetchFixtures(sport: Sport, apiKey: string): Promise<Fixture[]> {
     }
   }
 
-  // Cap to keep prompt small
-  return fixtures.slice(0, 60);
+  // Dedupe by match+date
+  const seen = new Set<string>();
+  const unique = fixtures.filter((f) => {
+    const k = `${f.date}|${f.match}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  return unique.slice(0, 120);
 }
 
 export const analyzeMatches = createServerFn({ method: "POST" })
@@ -172,7 +228,8 @@ Reason from your knowledge of recent form, injuries, head-to-head, home advantag
 You DO NOT have live news access — be honest in reasoning if recent context is uncertain.
 
 Rules:
-- Pick the 8-15 most interesting matches from the list (skip unknown lower-tier matches).
+- Analyze EVERY match in the list — do not skip any. If the list has 40 matches, return 40 predictions.
+- Only skip a match if you genuinely have zero knowledge of either team/player.
 - For each, give exactly ONE bet on a common market (Match Winner, Money Line, Over/Under, Handicap, BTTS, Set Winner).
 - Probability is YOUR honest model-estimated probability the pick wins (0-100). Be calibrated — most edges are 50-70%; reserve 80%+ for genuinely lopsided matchups.
 - Reasoning: 1-2 sentences citing specific factors.
